@@ -57,12 +57,21 @@ STARTING_BANKROLL = 25.0
 
 
 def get_api_client():
-    """Return authenticated Matchbook client or None if not configured."""
+    """
+    Return authenticated Matchbook client. Caches in session_state to avoid
+    repeated logins (which trigger 429 rate limit).
+    """
+    if "matchbook_client" in st.session_state and st.session_state.matchbook_client is not None:
+        return st.session_state.matchbook_client
     try:
         client = MatchbookClient()
         client.login()
+        st.session_state.matchbook_client = client
+        if "matchbook_last_error" in st.session_state:
+            del st.session_state.matchbook_last_error
         return client
-    except MatchbookAPIError:
+    except (MatchbookAPIError, Exception) as e:
+        st.session_state.matchbook_last_error = str(e)[:100]
         return None
 
 
@@ -98,14 +107,11 @@ def get_offers_from_api() -> list[dict]:
 
 def get_connection_status() -> tuple[bool, str]:
     """Return (connected, message) for Matchbook API connection status."""
-    try:
-        client = MatchbookClient()
-        client.login()
+    client = get_api_client()
+    if client:
         return True, "Connected"
-    except MatchbookAPIError as e:
-        return False, f"Failed — {str(e)[:80]}"
-    except Exception as e:
-        return False, f"Failed — {str(e)[:80]}"
+    msg = st.session_state.get("matchbook_last_error", "Unknown error")
+    return False, f"Failed — {msg}"
 
 
 def get_bot_status() -> tuple[str, str, str]:
@@ -296,6 +302,8 @@ def main():
             st.success(conn_msg)
         else:
             st.error(conn_msg)
+            if "429" in conn_msg:
+                st.caption("Rate limited. Wait 1–2 min, then click Refresh.")
     with col_status2:
         st.caption("Bot")
         if bot_status == "Running":
