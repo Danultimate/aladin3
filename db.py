@@ -188,6 +188,65 @@ def get_last_snapshot_time() -> Optional[str]:
         conn.close()
 
 
+def get_daily_pnl(limit_days: int = 30) -> list[tuple[str, float]]:
+    """
+    Return [(date, pnl), ...] for daily P&L chart.
+    P&L = last balance of day - first balance of day.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT timestamp, balance FROM bankroll_snapshots ORDER BY timestamp"
+        )
+        rows = cursor.fetchall()
+        by_day = {}
+        for row in rows:
+            day = row["timestamp"][:10]
+            bal = row["balance"]
+            if day not in by_day:
+                by_day[day] = {"first": bal, "last": bal}
+            by_day[day]["last"] = bal
+        result = [(day, by_day[day]["last"] - by_day[day]["first"]) for day in sorted(by_day.keys(), reverse=True)]
+        return result[:limit_days]
+    finally:
+        conn.close()
+
+
+def get_refresh_interval() -> int:
+    """Return refresh interval in seconds. Default 30."""
+    try:
+        conn = get_connection()
+        try:
+            cursor = conn.execute(
+                "SELECT value FROM settings WHERE key = ?", ("refresh_interval",)
+            )
+            row = cursor.fetchone()
+            if row and row["value"]:
+                return int(row["value"])
+            return 30
+        finally:
+            conn.close()
+    except (sqlite3.OperationalError, ValueError):
+        return 30
+
+
+def set_refresh_interval(seconds: int) -> None:
+    """Set refresh interval in seconds."""
+    try:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                ("refresh_interval", str(max(10, min(300, seconds)))),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        _ensure_settings_table()
+        set_refresh_interval(seconds)
+
+
 def upsert_position(
     offer_id: int,
     event_id: int,

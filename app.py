@@ -54,7 +54,6 @@ st.markdown(
 # Constants
 TARGET_BANKROLL = 5000.0
 STARTING_BANKROLL = 25.0
-REFRESH_INTERVAL = 30  # seconds
 
 
 def get_api_client():
@@ -109,20 +108,33 @@ def get_connection_status() -> tuple[bool, str]:
         return False, f"Failed — {str(e)[:50]}"
 
 
-def get_bot_status() -> tuple[str, str]:
-    """Return (status, detail) for bot. Uses last bankroll snapshot timestamp."""
+def get_bot_status() -> tuple[str, str, str]:
+    """Return (status, detail, last_ts_formatted) for bot."""
     last_ts = db.get_last_snapshot_time()
     if not last_ts:
-        return "Unknown", "No snapshots yet"
+        return "Unknown", "No snapshots yet", ""
+    ts_display = last_ts[:19].replace("T", " ") if last_ts else ""
     try:
         ts_compact = last_ts.replace("T", " ").replace("Z", "")[:19]
         dt = datetime.strptime(ts_compact, "%Y-%m-%d %H:%M:%S")
         age_sec = (datetime.utcnow() - dt).total_seconds()
         if age_sec < BOT_ACTIVE_THRESHOLD_SEC:
-            return "Running", f"Last snapshot {int(age_sec)}s ago"
-        return "Offline or idle", f"Last snapshot {int(age_sec // 60)}m ago"
+            return "Running", f"Last snapshot {int(age_sec)}s ago", ts_display
+        return "Offline or idle", f"Last snapshot {int(age_sec // 60)}m ago", ts_display
     except Exception:
-        return "Unknown", last_ts[:30]
+        return "Unknown", last_ts[:30], ts_display
+
+
+def cancel_offer(offer_id: int) -> tuple[bool, str]:
+    """Cancel a single open offer by ID."""
+    client = get_api_client()
+    if not client:
+        return False, "Not logged in."
+    try:
+        client.cancel_offers(offer_ids=[offer_id])
+        return True, f"Offer {offer_id} cancelled."
+    except MatchbookAPIError as e:
+        return False, str(e)
 
 
 def panic_hedge() -> tuple[bool, str]:
@@ -272,10 +284,12 @@ def main():
 
     st.divider()
 
-    # Status bar: Connection, Bot, Manual refresh
+    # Status bar: Connection, Bot, Refresh interval, Manual refresh
     conn_ok, conn_msg = get_connection_status()
-    bot_status, bot_detail = get_bot_status()
-    col_status1, col_status2, col_status3, col_status4 = st.columns([1, 1, 1, 2])
+    bot_status, bot_detail, last_cycle_ts = get_bot_status()
+    refresh_interval = db.get_refresh_interval()
+
+    col_status1, col_status2, col_status3, col_status4, col_status5 = st.columns([1, 1, 1, 1, 2])
     with col_status1:
         st.caption("Matchbook")
         if conn_ok:
@@ -291,7 +305,23 @@ def main():
         else:
             st.info(bot_status)
         st.caption(bot_detail)
+        if last_cycle_ts:
+            st.caption(f"Last cycle: {last_cycle_ts}")
     with col_status3:
+        st.caption("Refresh (sec)")
+        new_interval = st.number_input(
+            "Interval",
+            min_value=10,
+            max_value=300,
+            value=refresh_interval,
+            step=5,
+            key="refresh_interval_input",
+            label_visibility="collapsed",
+        )
+        if new_interval != refresh_interval:
+            db.set_refresh_interval(int(new_interval))
+            st.rerun()
+    with col_status4:
         st.caption("Refresh")
         if st.button("Refresh now"):
             st.session_state.last_refresh = time.time()
@@ -335,21 +365,28 @@ def main():
     st.progress(progress / 100)
     st.caption(f"£25 → £5,000 | Progress: {progress:.1f}% (£{balance:.2f})")
 
-    # Active positions table
+    # Active positions table (with event name and cancel per open offer)
     st.subheader("Active Positions")
     offers = get_offers_from_api()
     if offers:
-        rows = []
         for o in offers:
-            rows.append({
-                "Market": o.get("market-name", ""),
-                "Selection": o.get("runner-name", ""),
-                "Side": o.get("side", "").upper(),
-                "Odds": o.get("decimal-odds") or o.get("odds", 0),
-                "Stake": o.get("stake", 0),
-                "Status": o.get("status", ""),
-            })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+            is_open = o.get("status") == "open"
+            col_info, col_btn = st.columns([5, 1])
+            with col_info:
+                event_name = o.get("event-name") or o.get("event_name") or f"Event {o.get('event-id', '')}"
+                st.markdown(
+                    f"**{event_name}** · {o.get('market-name', '')} · {o.get('runner-name', '')} · "
+                    f"{o.get('side', '').upper()} @ {o.get('decimal-odds') or o.get('odds', 0)} · "
+                    f"£{o.get('stake', 0)} · *{o.get('status', '')}*"
+                )
+            with col_btn:
+                if is_open and st.button("Cancel", key=f"cancel_{o.get('id')}"):
+                    ok, msg = cancel_offer(o["id"])
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+                    st.rerun()
     else:
         st.info("No active positions. Connect to Matchbook (check .env) or bot not running.")
 
@@ -383,6 +420,27 @@ def main():
         else:
             st.error(msg)
 
+    # Daily P&L chart
+    st.subheader("Daily P&L")
+    daily_pnl = db.get_daily_pnl(limit_days=14)
+    if daily_pnl:
+        dates = [d[0] for d in reversed(daily_pnl)]
+        pnls = [d[1] for d in reversed(daily_pnl)]
+        colors = ["#00d4aa" if p >= 0 else "#ff6b6b" for p in pnls]
+        fig_pnl = go.Figure(go.Bar(x=dates, y=pnls, marker_color=colors, name="Daily P&L (£)"))
+        fig_pnl.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis_title="Date",
+            yaxis_title="P&L (£)",
+            margin=dict(l=40, r=40, t=40, b=40),
+            height=250,
+        )
+        st.plotly_chart(fig_pnl, use_container_width=True)
+    else:
+        st.info("No daily P&L data yet. Run the bot to record snapshots.")
+
     # Analytics - equity curve
     st.subheader("Bankroll Equity Curve")
     timestamps, balances = db.get_equity_curve()
@@ -415,7 +473,7 @@ def main():
     # Auto-refresh
     if "last_refresh" not in st.session_state:
         st.session_state.last_refresh = time.time()
-    if time.time() - st.session_state.last_refresh > REFRESH_INTERVAL:
+    if time.time() - st.session_state.last_refresh > db.get_refresh_interval():
         st.session_state.last_refresh = time.time()
         st.rerun()
 
