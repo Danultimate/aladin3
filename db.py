@@ -161,6 +161,33 @@ def get_equity_curve() -> tuple[list[str], list[float]]:
         conn.close()
 
 
+def get_trades(limit: int = 50) -> list[dict]:
+    """Return recent trades for the trade history table."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """SELECT id, event_id, market_id, runner_id, side, odds, stake, matched_at, profit, phase
+               FROM trades ORDER BY matched_at DESC LIMIT ?""",
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_last_snapshot_time() -> Optional[str]:
+    """Return timestamp of last bankroll snapshot (for bot status)."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT timestamp FROM bankroll_snapshots ORDER BY timestamp DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        return row["timestamp"] if row else None
+    finally:
+        conn.close()
+
+
 def upsert_position(
     offer_id: int,
     event_id: int,

@@ -6,12 +6,14 @@ Dark-mode UI with header metrics, goal tracker, active positions, panic hedge, a
 import time
 from datetime import datetime
 
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
 import db
 from matchbook_api import MatchbookClient, MatchbookAPIError, greening_up_lay_stake, lay_liability
+
+# Bot considered "running" if last snapshot within this many seconds
+BOT_ACTIVE_THRESHOLD_SEC = 120
 
 # Page config - dark theme
 st.set_page_config(
@@ -93,6 +95,34 @@ def get_offers_from_api() -> list[dict]:
         return data.get("offers", [])
     except MatchbookAPIError:
         return []
+
+
+def get_connection_status() -> tuple[bool, str]:
+    """Return (connected, message) for Matchbook API connection status."""
+    client = get_api_client()
+    if not client:
+        return False, "Failed — check .env credentials"
+    try:
+        client.get_account()
+        return True, "Connected"
+    except Exception as e:
+        return False, f"Failed — {str(e)[:50]}"
+
+
+def get_bot_status() -> tuple[str, str]:
+    """Return (status, detail) for bot. Uses last bankroll snapshot timestamp."""
+    last_ts = db.get_last_snapshot_time()
+    if not last_ts:
+        return "Unknown", "No snapshots yet"
+    try:
+        ts_compact = last_ts.replace("T", " ").replace("Z", "")[:19]
+        dt = datetime.strptime(ts_compact, "%Y-%m-%d %H:%M:%S")
+        age_sec = (datetime.utcnow() - dt).total_seconds()
+        if age_sec < BOT_ACTIVE_THRESHOLD_SEC:
+            return "Running", f"Last snapshot {int(age_sec)}s ago"
+        return "Offline or idle", f"Last snapshot {int(age_sec // 60)}m ago"
+    except Exception:
+        return "Unknown", last_ts[:30]
 
 
 def panic_hedge() -> tuple[bool, str]:
@@ -242,6 +272,31 @@ def main():
 
     st.divider()
 
+    # Status bar: Connection, Bot, Manual refresh
+    conn_ok, conn_msg = get_connection_status()
+    bot_status, bot_detail = get_bot_status()
+    col_status1, col_status2, col_status3, col_status4 = st.columns([1, 1, 1, 2])
+    with col_status1:
+        st.caption("Matchbook")
+        if conn_ok:
+            st.success(conn_msg)
+        else:
+            st.error(conn_msg)
+    with col_status2:
+        st.caption("Bot")
+        if bot_status == "Running":
+            st.success(bot_status)
+        elif bot_status == "Offline or idle":
+            st.warning(bot_status)
+        else:
+            st.info(bot_status)
+        st.caption(bot_detail)
+    with col_status3:
+        st.caption("Refresh")
+        if st.button("Refresh now"):
+            st.session_state.last_refresh = time.time()
+            st.rerun()
+
     # Header metrics
     api_balance, api_exposure, api_phase = get_balance_from_api()
     db_balance = db.get_latest_balance()
@@ -260,15 +315,19 @@ def main():
     else:
         daily_roi = 0.0
 
-    col1, col2, col3, col4 = st.columns(4)
+    cumulative_pnl = balance - STARTING_BANKROLL
+
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("Current Bankroll (£)", f"£{balance:.2f}")
     with col2:
-        st.metric("Current Daily ROI (%)", f"{daily_roi:.2f}%")
+        st.metric("Cumulative P&L (£)", f"£{cumulative_pnl:+.2f}")
     with col3:
-        st.metric("Total Open Exposure (£)", f"£{exposure:.2f}")
+        st.metric("Daily ROI (%)", f"{daily_roi:.2f}%")
     with col4:
-        st.metric("Active Phase", f"Phase {phase}")
+        st.metric("Open Exposure (£)", f"£{exposure:.2f}")
+    with col5:
+        st.metric("Phase", f"Phase {phase}")
 
     # Goal tracker
     st.subheader("Goal Tracker")
@@ -293,6 +352,26 @@ def main():
         st.dataframe(rows, use_container_width=True, hide_index=True)
     else:
         st.info("No active positions. Connect to Matchbook (check .env) or bot not running.")
+
+    # Trade history
+    st.subheader("Trade History")
+    trades = db.get_trades(limit=50)
+    if trades:
+        trade_rows = []
+        for t in trades:
+            trade_rows.append({
+                "Date": t.get("matched_at", "")[:19].replace("T", " ") if t.get("matched_at") else "",
+                "Event ID": t.get("event_id", ""),
+                "Runner ID": t.get("runner_id", ""),
+                "Side": (t.get("side", "") or "").upper(),
+                "Odds": t.get("odds", 0),
+                "Stake": t.get("stake", 0),
+                "Profit (£)": t.get("profit") if t.get("profit") is not None else "—",
+                "Phase": t.get("phase", ""),
+            })
+        st.dataframe(trade_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No trades yet. Completed trades will appear here.")
 
     # Emergency control
     st.subheader("Emergency Control")
