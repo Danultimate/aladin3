@@ -98,14 +98,14 @@ def get_offers_from_api() -> list[dict]:
 
 def get_connection_status() -> tuple[bool, str]:
     """Return (connected, message) for Matchbook API connection status."""
-    client = get_api_client()
-    if not client:
-        return False, "Failed — check .env credentials"
     try:
-        client.get_account()
+        client = MatchbookClient()
+        client.login()
         return True, "Connected"
+    except MatchbookAPIError as e:
+        return False, f"Failed — {str(e)[:80]}"
     except Exception as e:
-        return False, f"Failed — {str(e)[:50]}"
+        return False, f"Failed — {str(e)[:80]}"
 
 
 def get_bot_status() -> tuple[str, str, str]:

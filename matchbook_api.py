@@ -8,11 +8,14 @@ import logging
 import time
 from typing import Any, Optional
 
+import os
+from pathlib import Path
+
 import requests
 from dotenv import load_dotenv
-import os
 
-load_dotenv()
+# Load .env from project root (where this file lives)
+load_dotenv(Path(__file__).parent / ".env")
 
 logger = logging.getLogger(__name__)
 
