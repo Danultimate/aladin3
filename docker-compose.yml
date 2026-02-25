@@ -1,0 +1,17 @@
+# Matchbook Trading System - Docker deployment
+# Run: docker compose up -d
+
+services:
+  bot:
+    build: .
+    command: python bot.py
+    restart: unless-stopped
+    env_file: .env
+
+  dashboard:
+    build: .
+    command: streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    env_file: .env
